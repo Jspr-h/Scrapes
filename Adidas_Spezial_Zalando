@@ -1,0 +1,150 @@
+import time
+import smtplib
+from email.message import EmailMessage
+from selenium import webdriver
+from selenium.webdriver.firefox.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+from selenium.webdriver.firefox.service import Service
+
+# ----- Firefox options -----
+options = Options()
+options.add_argument("--headless")
+options.set_preference("geo.enabled", False)
+options.set_preference("geo.prompt.testing", False)
+options.set_preference("geo.prompt.testing.allow", False)
+options.set_preference("media.navigator.permission.disabled", True)
+options.set_preference("permissions.default.geo", 2)
+options.set_preference("network.cookie.cookieBehavior", 1)
+
+# Angiv path til geckodriver
+gecko_path = "/usr/local/bin/geckodriver"
+service = Service(executable_path=gecko_path)
+
+browser = webdriver.Firefox(service=service, options=options)
+browser.maximize_window()
+browser.get("https://www.zalando.dk/adidas-originals-handball-spezial-unisex-sneakers-silver-greencream-whitemagic-mauve-ad115o1po-m11.html")
+
+# ----- Cookie klik via shadow DOM -----
+def click_cookie_button_shadow_dom(driver, timeout=15):
+    end_time = time.time() + timeout
+    while time.time() < end_time:
+        try:
+            btn = driver.execute_script("""
+                const root = document.querySelector('div#usercentrics-root')?.shadowRoot;
+                if (!root) return null;
+                return root.querySelector('button.sc-dcJsrY.kXOIji');
+            """)
+            if btn:
+                btn.click()
+                print("✅ Klikkede på cookie-knappen via shadow DOM")
+                return True
+        except Exception:
+            pass
+        time.sleep(0.5)
+    print("❌ Ingen cookie-knap fundet")
+    return False
+
+# ----- Mail funktion -----
+def send_mail(sender_email, sender_password, receiver_email, subject, body):
+    msg = EmailMessage()
+    msg['From'] = sender_email
+    msg['To'] = receiver_email
+    msg['Subject'] = subject
+    msg.set_content(body)
+
+    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as smtp:
+        smtp.login(sender_email, sender_password)
+        smtp.send_message(msg)
+
+    print(f"Mail sendt til {receiver_email}.")
+
+# ----- Funktion til at finde status for størrelse 42 -----
+def find_status_for_size(browser, wait, size="42"):
+    try:
+        try:
+            vælg_størrelse_btn = wait.until(
+                EC.element_to_be_clickable((By.XPATH, "//span[contains(text(),'Vælg størrelse')]/ancestor::button"))
+            )
+            browser.execute_script("arguments[0].scrollIntoView({block: 'center'});", vælg_størrelse_btn)
+            time.sleep(1)
+            vælg_størrelse_btn.click()
+            print("✅ Klikkede på 'Vælg størrelse'")
+        except TimeoutException:
+            print("❌ Kunne ikke finde 'Vælg størrelse'")
+            return None
+
+        time.sleep(2)
+
+        try:
+            scrollable_container = wait.until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "div[role='listbox']"))
+            )
+            for i in range(0, 1000, 100):
+                browser.execute_script(f"arguments[0].scrollTop = {i};", scrollable_container)
+                time.sleep(0.2)
+        except TimeoutException:
+            print("❌ Kunne ikke finde størrelseslisten")
+            return None
+
+        try:
+            size_div = wait.until(
+                EC.presence_of_element_located((By.XPATH, f"//div[@role='listitem' and .//span[text()='{size}']]"))
+            )
+            status_span = size_div.find_element(By.CSS_SELECTOR, "div.nXkCf3 > span.voFjEy._3ObVF2.Sb5G3D._7_FqPM")
+            status_tekst = status_span.text.strip()
+            if status_tekst:
+                if status_tekst.lower() == "påmind mig":
+                    print(f"⚠️ Størrelse {size} er udsolgt (Påmind mig)")
+                else:
+                    print(f"Status ud for størrelse {size}: '{status_tekst}'")
+                return status_tekst
+            else:
+                print("❌ Ingen tekst fundet i span")
+                return None
+        except (TimeoutException, NoSuchElementException):
+            print(f"❌ Ingen status fundet for størrelse {size}")
+            return None
+
+    except Exception as e:
+        print("Noget gik galt i find_status_for_size:", e)
+        return None
+
+# ----- Main loop med gentagelser -----
+try:
+    clicked = click_cookie_button_shadow_dom(browser)
+    if not clicked:
+        print("Fortsætter uden cookie-klik (kan påvirke oplevelsen)")
+
+    wait = WebDriverWait(browser, 20)
+
+    status_tekst = None
+    max_attempts = 5
+    for attempt in range(1, max_attempts + 1):
+        print(f"Forsøg {attempt} for at finde status...")
+        status_tekst = find_status_for_size(browser, wait)
+        if status_tekst:
+            break
+        time.sleep(3)
+
+    # Send mail kun hvis status findes og ikke er "Påmind mig"
+    if status_tekst and status_tekst.lower() != "påmind mig":
+        mail_body = f"Lagerstatus for størrelse 42: {status_tekst}"
+        sender = ""
+        password = ""  # App-password i Gmail
+        receiver = ""
+        subject = "Status for HANDBALL SPEZIAL UNISEX - Sneakers, str. 42"
+        send_mail(sender, password, receiver, subject, mail_body)
+    elif status_tekst and status_tekst.lower() == "påmind mig":
+        print("De er udsolgt – ingen mail sendes.")
+    else:
+        print("Status kunne ikke findes – ingen mail sendes.")
+
+except Exception as e:
+    print("Noget gik galt i hovedscriptet:", e)
+
+finally:
+    time.sleep(2)
+    browser.quit()
